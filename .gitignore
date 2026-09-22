@@ -1,0 +1,51 @@
+# ==========================================
+# DLSS5 for Blender .gitignore
+# ==========================================
+
+# 1. 动态链接库与大模型权重 (严格排除，避免侵权与仓库膨胀)
+*.dll
+dlss5_blender/dlls/*.dll
+
+# 2. 预分发压缩包 (通过 GitHub Releases 分发)
+*.zip
+*.tar.gz
+*.7z
+
+# 3. C++ 编译产物与可执行程序
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.exe
+/bin/
+src_worker/build/
+src_worker/*.obj
+dlss5_blender/bin/*.exe
+
+# 4. Python 运行时缓存
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+
+# 5. 渲染测试图像与中间数据
+*.exr
+*.raw
+*.hdr
+reconstructed_test.png
+
+# 6. IDE 与系统文件
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+x64/
+Debug/
+Release/
+Thumbs.db
+Desktop.ini
