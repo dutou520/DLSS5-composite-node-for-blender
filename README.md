@@ -54,10 +54,6 @@
   提供标准的 `DLSS 5 神经渲染`（`CompositorNodeDLSS5`）原生合成器节点。自动装配 `Image`、`Depth`、`Vector (Motion)` 与 `Normal` 输入通道，与下游调色、色彩平衡（Color Balance）、眩光（Glare）及 Composite 输出节点无缝串联。
 - **🎯 专有微架构优化 (Per-Architecture Tuning for RTX 20/30/40/50)**:  
   针对 Turing (RTX 20)、Ampere (RTX 30)、Ada Lovelace (RTX 40) 和 Blackwell (RTX 50) 架构进行独立模型调校与编译，释放每一代 Tensor Core（FP16/INT8/FP8/稀疏化）的最大物理算力。
-- **🛡️ 跨架构硬件安全防护 (Cross-Architecture Safety Guard)**:  
-  内置自检诊断模块。若用户安装了非匹配架构的分发包，系统将精准提示并优雅拦截，绝不发生崩溃或闪退。
-- **🚫 零假冒软件模拟 (Zero Fake Emulation)**:  
-  坚决杜绝任何使用 OpenCV 仿造模拟神经渲染的伪装方案，百分之百依托 Direct3D 12 硬件管道与 NVIDIA NGX 神经权重。
 
 ---
 
