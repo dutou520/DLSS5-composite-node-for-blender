@@ -162,70 +162,24 @@ class CompositorNodeDLSS5(CustomGroupBase):
         if not out_img:
             out_img = get_or_create_output_image(1920, 1080)
 
-        def _setup_dump_node(tree, ginp_node):
-            dump_node = tree.nodes.get("DLSS5_Internal_Dump")
-            if not dump_node:
+        if self.node_tree is not None:
+            # 清理可能导致 Blender 5.x C++ 合成器编译器崩溃的转储节点
+            dump_node = self.node_tree.nodes.get("DLSS5_Internal_Dump")
+            if dump_node:
                 try:
-                    dump_node = tree.nodes.new('CompositorNodeOutputFile')
-                    dump_node.name = "DLSS5_Internal_Dump"
-                    dump_node.label = "DLSS5 内部缓存"
-                    dump_node.location = (0, -250)
-                except Exception:
-                    return
-
-            try:
-                temp_dir = tempfile.gettempdir()
-                if hasattr(dump_node, 'directory'):
-                    dump_node.directory = temp_dir
-                    dump_node.file_name = "dlss5_raw_"
-                    if hasattr(dump_node, 'file_output_items') and len(dump_node.file_output_items) == 0:
-                        try:
-                            dump_node.file_output_items.new('RGBA', 'Image')
-                        except Exception:
-                            pass
-                else:
-                    dump_node.base_path = temp_dir
-                    if hasattr(dump_node, 'file_slots') and len(dump_node.file_slots) > 0:
-                        dump_node.file_slots[0].path = "dlss5_raw_"
-
-                try:
-                    dump_node.format.file_format = 'OPEN_EXR'
-                except Exception:
-                    try:
-                        dump_node.format.file_format = 'OPEN_EXR_MULTILAYER'
-                    except Exception:
-                        pass
-                try:
-                    dump_node.format.color_depth = '32'
+                    self.node_tree.nodes.remove(dump_node)
                 except Exception:
                     pass
 
-                # 连接 Group Input 的 Image 到内部转储节点，捕获纯净未被污染的上游渲染
-                if "Image" in ginp_node.outputs and len(dump_node.inputs) > 0:
-                    inp = dump_node.inputs.get("Image") or dump_node.inputs[0]
-                    if not inp.is_linked:
-                        tree.links.new(ginp_node.outputs["Image"], inp)
-            except Exception as e:
-                print(f"[DLSS5] 内部缓存节点配置提示: {e}")
-
-        if self.node_tree is not None:
             img_node = self.node_tree.nodes.get("DLSS5_Internal_Image")
             if not img_node:
                 for n in self.node_tree.nodes:
                     if n.bl_idname == 'CompositorNodeImage':
                         img_node = n
                         break
-            if img_node:
-                if img_node.image != out_img:
-                    img_node.image = out_img
-                ginp = None
-                for n in self.node_tree.nodes:
-                    if n.bl_idname == 'NodeGroupInput':
-                        ginp = n
-                        break
-                if ginp:
-                    _setup_dump_node(self.node_tree, ginp)
-                return self.node_tree
+            if img_node and img_node.image != out_img:
+                img_node.image = out_img
+            return self.node_tree
 
         tree_name = f"DLSS5_Tree_{self.name}"
         ng = bpy.data.node_groups.new(tree_name, 'CompositorNodeTree')
@@ -264,8 +218,6 @@ class CompositorNodeDLSS5(CustomGroupBase):
             ng.links.new(img_node.outputs["Alpha"], gout.inputs["Alpha"])
         if "Depth" in ginp.outputs and "Depth" in gout.inputs:
             ng.links.new(ginp.outputs["Depth"], gout.inputs["Depth"])
-
-        _setup_dump_node(ng, ginp)
 
         self.node_tree = ng
         return self.node_tree
