@@ -23,6 +23,17 @@
 ### 1. 项目简介 (Overview)
 **DLSS5 Composite Node for Blender** 是一款专为 Blender 打造的原生硬件级深度学习超分辨率与神经重建（Neural Rendering）插件。基于 NVIDIA 深度学习神经渲染（DLSS-NR, Feature ID 18）与原生 Direct3D 12 Tensor Core 硬件流水线，将原本耗时数十分钟的离线光线追踪降噪与画质重构过程缩短至毫秒级别，实现极致的逼真渲染与生产力提升。
 
+### 快速开始
+只需简单三步即可在 Blender 合成器中启用 DLSS 5 原生神经渲染：
+
+![DLSS5 合成器节点树配置示意图](docs/images/quickstart_node_setup.png)
+
+1. **安装插件**：前往 [Releases 页面](https://github.com/dutou520/DLSS5-composite-node-for-blender/releases) 下载对应显卡架构的 `.zip` 压缩包，在 Blender 偏好设置中安装并勾选启用 **Node: DLSS5 神经渲染 (Neural Rendering)**。
+2. **连接合成器节点**：进入 Blender 合成器（Compositor），按 `Shift + A` 添加 **DLSS 5 神经渲染**（`DLSS5 Neural Rendering`）节点（或在 3D 视图侧边栏 DLSS5 面板点击“自动化配置合成器节点树”）。将 `渲染层 (Render Layers)` 的 `图像 (Image)` 与 `深度 (Depth)` 端口连接至 DLSS5 节点（渲染动画时可按需连接 `矢量 (Vector)` 端口），并将 DLSS5 输出的 `图像`、`Alpha`、`深度` 端口直接连接至 `合成 (Composite)`。
+3. **一键渲染与重构**：在节点上保持勾选 **渲染后自动执行 (Auto Run After Render)**，按 `F12` 执行常规渲染。渲染完成后，后台物理 Tensor Core 流水线将在毫秒内自动完成神经降噪与高保真画质重建！
+
+---
+
 ### 效果预览
 展示 DLSS5 原生 Tensor Core 硬件神经渲染的实际画质重构与降噪效果对比：
 
@@ -33,17 +44,6 @@
 #### 复杂场景几何与光影重构对比 (null DLSS vs DLSS 5)
 ![复杂场景降噪与重建对比](docs/images/preview_scene_comparison.png)
 > **效果解析**：在极低采样步数下，画面原本包含强烈的蒙特卡洛噪波与边缘锯齿，DLSS 5 通过深度、法线与运动矢量时空联合推断，精准恢复了花卉平滑曲面、台阶材质纹理与环境阴影渐变。
-
----
-
-### 快速开始
-只需简单三步即可在 Blender 合成器中启用 DLSS 5 原生神经渲染：
-
-![DLSS5 合成器节点树配置示意图](docs/images/quickstart_node_setup.png)
-
-1. **安装插件**：前往 [Releases 页面](https://github.com/dutou520/DLSS5-composite-node-for-blender/releases) 下载对应显卡架构的 `.zip` 压缩包，在 Blender 偏好设置中安装并勾选启用 **Node: DLSS5 神经渲染 (Neural Rendering)**。
-2. **连接合成器节点**：进入 Blender 合成器（Compositor），按 `Shift + A` 添加 **DLSS 5 神经渲染**（`DLSS5 Neural Rendering`）节点（或在 3D 视图侧边栏 DLSS5 面板点击“自动化配置合成器节点树”）。将 `渲染层 (Render Layers)` 的 `图像 (Image)`、`深度 (Depth)` 与 `矢量 (Vector)` 端口连接至 DLSS5 节点，并将 DLSS5 输出连接至 `合成 (Composite)`。
-3. **一键渲染与重构**：在节点上保持勾选 **渲染后自动执行 (Auto Run After Render)**，按 `F12` 执行常规渲染。渲染完成后，后台物理 Tensor Core 流水线将在毫秒内自动完成神经降噪与高保真画质重建！
 
 ---
 
@@ -134,7 +134,18 @@ copy /Y build\Release\dlss5_worker.exe dlss5_blender\bin\dlss5_worker.exe
 ### 1. Overview
 **DLSS5 Composite Node for Blender** brings native hardware-accelerated Deep Learning Super Sampling and Neural Rendering (DLSS-NR, Feature ID 18) directly to Blender's compositor. Leveraging Direct3D 12 and dedicated NVIDIA Tensor Cores, it delivers ultra-low latency, photorealistic offline rendering reconstruction in milliseconds.
 
-### 效果预览 / Visual Previews
+### Quick Start
+Get started with DLSS 5 native hardware neural rendering in three simple steps:
+
+![DLSS5 Compositor Node Setup](docs/images/quickstart_node_setup.png)
+
+1. **Install Add-on**: Download the `.zip` release matching your GPU architecture from [GitHub Releases](https://github.com/dutou520/DLSS5-composite-node-for-blender/releases), install and enable **Node: DLSS5 神经渲染 (Neural Rendering)** in Blender Preferences.
+2. **Connect Compositor Nodes**: In Blender Compositor, press `Shift + A` to add the **DLSS 5 Neural Rendering** node (or click "Auto Setup Compositor" in the 3D View sidebar). Connect `Render Layers` (`Image` and `Depth`) to the DLSS5 node (optionally connect `Vector` for animation), and route DLSS5's `Image`, `Alpha`, and `Depth` outputs directly to `Composite` / `Viewer`.
+3. **Render & Reconstruct**: Keep **Auto Run After Render** checked, then press `F12` to render. The background Direct3D 12 Tensor Core engine automatically reconstructs photorealistic frames in milliseconds upon render completion!
+
+---
+
+### Visual Previews
 Side-by-side reconstruction and denoising showcase powered by DLSS5 native Tensor Core hardware neural rendering:
 
 #### Character Detail Reconstruction (Null DLSS vs DLSS 5)
@@ -144,17 +155,6 @@ Side-by-side reconstruction and denoising showcase powered by DLSS5 native Tenso
 #### Complex Scene Denoising & Reconstruction (null DLSS vs DLSS 5)
 ![Complex Scene Denoising & Reconstruction](docs/images/preview_scene_comparison.png)
 > **Quality Analysis**: Under low sample counts, the raw image suffers from heavy Monte Carlo variance and edge aliasing. DLSS 5 spatio-temporally reconstructs smooth petal curves, concrete stair textures, and soft shadow gradients using depth, normal, and motion vectors.
-
----
-
-### 快速开始 / Quick Start
-Get started with DLSS 5 native hardware neural rendering in three simple steps:
-
-![DLSS5 Compositor Node Setup](docs/images/quickstart_node_setup.png)
-
-1. **Install Add-on**: Download the `.zip` release matching your GPU architecture from [GitHub Releases](https://github.com/dutou520/DLSS5-composite-node-for-blender/releases), install and enable **Node: DLSS5 神经渲染 (Neural Rendering)** in Blender Preferences.
-2. **Connect Compositor Nodes**: In Blender Compositor, press `Shift + A` to add the **DLSS 5 Neural Rendering** node (or click "Auto Setup Compositor" in the 3D View sidebar). Connect `Render Layers` (`Image`, `Depth`, `Vector`) to the DLSS5 node, and route the DLSS5 outputs to `Composite` / `Viewer`.
-3. **Render & Reconstruct**: Keep **Auto Run After Render** checked, then press `F12` to render. The background Direct3D 12 Tensor Core engine automatically reconstructs photorealistic frames in milliseconds upon render completion!
 
 ---
 
