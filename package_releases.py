@@ -121,7 +121,7 @@ def build_releases():
             for root, dirs, files in os.walk(ADDON_SOURCE_DIR):
                 dirs[:] = [d for d in dirs if d != "__pycache__" and not d.startswith(".")]
                 for f in sorted(files):
-                    if f.endswith((".pyc", ".pyo", ".tmp", ".raw")):
+                    if f.startswith(".") or f.endswith((".pyc", ".pyo", ".tmp", ".raw", ".md")):
                         continue
                     # 排除 dlls 目录下的 DLL 文件，由本脚本统一按显卡版本注入
                     rel_dir = os.path.relpath(root, ADDON_SOURCE_DIR)

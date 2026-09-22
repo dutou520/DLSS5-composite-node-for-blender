@@ -27,7 +27,8 @@ _last_process_time = 0.0
 _is_processing = False
 _DEBOUNCE_SECONDS = 1.5
 _last_node_params_hash = None
-_last_raw_render_rgba = None  # 缓存纯净原始 3D 渲染，参数微调时防止被下游调色递归污染
+_last_raw_render_rgba = None  # 视口防抖更新时缓存原始渲染帧，避免参数调节时递归读取合成结果
+_last_rendered_frame = None  # 记录最近一次处理的帧号，切帧时强制失效旧缓存
 _hijacked_targets = set()  # 保存被 on_render_pre 劫持的 (节点名, 插槽名)
 
 
@@ -62,12 +63,13 @@ def _restore_and_link_compositor(tree, node, img_source_node=None, upstream_sock
     pass
 
 
-def _run_dlss5_on_scene(scene, node=None):
+def _run_dlss5_on_scene(scene, node=None, is_viewport_update=False):
     """
     核心处理流程：提取渲染图像 -> DLSS5 C++ D3D12 Worker 处理 -> 写回输出图像数据块 -> 刷新合成器
     彻底严禁篡改创作者的任何节点连线，仅更新内部图像数据块！
     """
     global _is_processing, _last_process_time, _last_node_params_hash
+    global _last_raw_render_rgba, _last_rendered_frame
 
     if _is_processing:
         return False
@@ -85,32 +87,54 @@ def _run_dlss5_on_scene(scene, node=None):
     if hasattr(node, 'ensure_internal_tree'):
         node.ensure_internal_tree()
 
-    global _last_raw_render_rgba
-
     try:
         rgba = None
         temp_dir = tempfile.gettempdir()
         cur_frame = scene.frame_current if scene else 1
+
+        # 若切帧，强制失效历史渲染帧缓存，保证每一帧严格独立计算
+        if _last_rendered_frame is not None and cur_frame != _last_rendered_frame:
+            _last_raw_render_rgba = None
+        _last_rendered_frame = cur_frame
+
+        # 优先检索当前帧专属转储 OpenEXR 文件
         dump_candidates = [
             os.path.join(temp_dir, f"dlss5_raw_{cur_frame:04d}.exr"),
             os.path.join(temp_dir, f"dlss5_raw_{cur_frame}.exr"),
-            os.path.join(temp_dir, "dlss5_raw_.exr"),
-            os.path.join(temp_dir, "dlss5_raw_Image.exr"),
             os.path.join(temp_dir, f"dlss5_raw_Image{cur_frame:04d}.exr"),
+            os.path.join(temp_dir, f"dlss5_raw_Image_{cur_frame:04d}.exr"),
+            os.path.join(temp_dir, f"dlss5_raw_Image{cur_frame}.exr"),
+            os.path.join(temp_dir, f"dlss5_raw_Image_{cur_frame}.exr"),
         ]
+
+        import glob
+        for pat in (f"dlss5_raw_*{cur_frame:04d}*.exr", f"dlss5_raw_*{cur_frame}*.exr"):
+            for fpath in glob.glob(os.path.join(temp_dir, pat)):
+                if fpath not in dump_candidates:
+                    dump_candidates.append(fpath)
+
+        if is_viewport_update:
+            dump_candidates.extend([
+                os.path.join(temp_dir, "dlss5_raw_Image.exr"),
+                os.path.join(temp_dir, "dlss5_raw_.exr"),
+            ])
+
         for candidate in dump_candidates:
             if os.path.exists(candidate) and os.path.getsize(candidate) > 0:
                 try:
                     loaded = bpy.data.images.load(candidate, check_existing=False)
-                    from .core.image_processor import get_image_pixels_as_numpy, _set_image_linear_colorspace
-                    _set_image_linear_colorspace(loaded)
-                    rgba = get_image_pixels_as_numpy(loaded)
-                    bpy.data.images.remove(loaded)
-                    try:
-                        os.remove(candidate)
-                    except Exception:
-                        pass
-                    break
+                    if loaded.size[0] > 0 and loaded.size[1] > 0:
+                        from .core.image_processor import get_image_pixels_as_numpy, _set_image_linear_colorspace
+                        _set_image_linear_colorspace(loaded)
+                        rgba = get_image_pixels_as_numpy(loaded)
+                        bpy.data.images.remove(loaded)
+                        try:
+                            os.remove(candidate)
+                        except Exception:
+                            pass
+                        break
+                    else:
+                        bpy.data.images.remove(loaded)
                 except Exception as e:
                     print(f"[DLSS5] 读取内部缓存 EXR 失败: {e}")
 
@@ -125,11 +149,11 @@ def _run_dlss5_on_scene(scene, node=None):
                     except Exception:
                         pass
 
-        # 如果在防抖视口更新阶段且已有缓存的原始渲染帧，直接复用缓存（避免参数调节时递归读取合成结果）
-        if rgba is None and _last_raw_render_rgba is not None:
+        # 仅在纯视口参数防抖微调时复用上一帧缓存；渲染或动画过程中严禁复用以防帧间画面静止
+        if is_viewport_update and rgba is None and _last_raw_render_rgba is not None:
             rgba = _last_raw_render_rgba
 
-        # 兜底：从场景 Render Result 提取
+        # 兜底：从场景 Render Result 提取真实渲染层
         if rgba is None:
             try:
                 input_image = get_active_render_result_image()
@@ -204,75 +228,91 @@ def _run_dlss5_on_scene(scene, node=None):
 
 
 @persistent
-def on_render_pre(scene):
+def on_render_init(scene):
     """
-    渲染开始前回调：
-    1. 取消防抖定时器，重置可能卡顿的标志位
-    2. 严格杜绝修改创作者节点树连线
+    渲染作业启动初始化回调：
+    重置所有多帧渲染状态，清除上一帧残留缓存，取消视口更新定时器
     """
-    global _is_processing
+    global _is_processing, _last_raw_render_rgba, _last_rendered_frame
+    _is_processing = False
+    _last_raw_render_rgba = None
+    _last_rendered_frame = None
 
-    # 取消所有可能正在排队的视口更新定时器
     if bpy.app.timers.is_registered(_do_viewport_update):
         try:
             bpy.app.timers.unregister(_do_viewport_update)
         except Exception:
             pass
 
-    # 保证 F12 渲染处理入口不会被异常标志位阻断
+
+@persistent
+def on_render_pre(scene):
+    """
+    每帧渲染开始前回调：
+    1. 取消防抖定时器，重置每帧标志位与旧帧缓存
+    2. 严格杜绝修改创作者节点树连线
+    """
+    global _is_processing, _last_raw_render_rgba
     _is_processing = False
+    _last_raw_render_rgba = None
+
+    if bpy.app.timers.is_registered(_do_viewport_update):
+        try:
+            bpy.app.timers.unregister(_do_viewport_update)
+        except Exception:
+            pass
+
+
+@persistent
+def on_frame_change_pre(scene):
+    """
+    动画多帧切帧前回调：
+    重置帧间缓存，保证逐帧计算独立，杜绝上一帧画面回灌
+    """
+    global _is_processing, _last_raw_render_rgba
+    _is_processing = False
+    _last_raw_render_rgba = None
 
 
 @persistent
 def on_render_post(scene):
-    """单帧渲染完成后自动执行 DLSS5"""
+    """
+    单帧或动画序列单帧渲染完成后回调：
+    立即同步执行 DLSS5 神经后处理并写回合成器图像数据块。
+    无论后台无头模式还是交互式 GUI 模式 (Ctrl+F12 / F12)，
+    均在当前帧结束时同步完成，彻底杜绝定时器在动画过程中被抑制导致后续帧不更新的问题。
+    """
     target_scene = scene if scene else getattr(bpy.context, 'scene', None)
     node = _get_dlss5_node(target_scene) if target_scene else None
     if node is None or not node.auto_process_on_render:
         return
 
-    # 在无头/后台命令行渲染模式下，直接同步执行
-    if bpy.app.background:
-        try:
-            success = _run_dlss5_on_scene(target_scene, node)
-            if not success:
-                node.last_status = "自动处理未完成"
-        except Exception as e:
-            if node:
-                node.last_status = f"错误: {str(e)[:40]}"
-            print(f"[DLSS5 Error] 渲染后处理异常: {e}")
-        return
+    try:
+        success = _run_dlss5_on_scene(target_scene, node, is_viewport_update=False)
+        if not success:
+            node.last_status = "自动处理未完成"
+    except Exception as e:
+        if node:
+            node.last_status = f"错误: {str(e)[:40]}"
+        print(f"[DLSS5 Error] 渲染后处理异常: {e}")
 
-    # 交互式 GUI 渲染 (F12) 时，on_render_post 在后台渲染工作线程 (do_job_thread) 中执行。
-    # 必须通过 timers 将合成器修改与图像刷新调度到 Blender 主线程 (Main UI Thread)。
-    scene_name = target_scene.name if target_scene else None
-    retries = [0]
-    def _deferred_process():
-        global _is_processing
-        if _is_processing:
-            retries[0] += 1
-            if retries[0] < 200:  # 最多重试等待 10 秒 (200 * 0.05s)
-                return 0.05
-            print("[DLSS5 Warning] 等待前置处理超时，重置标志并执行本次渲染处理")
-            _is_processing = False
 
-        if hasattr(bpy.app, 'is_job_running') and bpy.app.is_job_running('RENDER'):
-            retries[0] += 1
-            if retries[0] < 200:
-                return 0.05
+@persistent
+def on_render_complete(scene):
+    """渲染作业全部完成回调：重置状态"""
+    global _is_processing, _last_raw_render_rgba, _last_rendered_frame
+    _is_processing = False
+    _last_raw_render_rgba = None
+    _last_rendered_frame = None
 
-        try:
-            s = bpy.data.scenes.get(scene_name) if scene_name else getattr(bpy.context, 'scene', None)
-            cur_node = _get_dlss5_node(s) if s else None
-            if cur_node and cur_node.auto_process_on_render:
-                success = _run_dlss5_on_scene(s, cur_node)
-                if not success:
-                    cur_node.last_status = "自动处理未完成"
-        except Exception as e:
-            print(f"[DLSS5 Error] 主线程派发渲染后处理异常: {e}")
-        return None  # 返回 None 表示仅单次执行，不重复触发
 
-    bpy.app.timers.register(_deferred_process, first_interval=0.01)
+@persistent
+def on_render_cancel(scene):
+    """渲染作业取消回调：重置状态"""
+    global _is_processing, _last_raw_render_rgba, _last_rendered_frame
+    _is_processing = False
+    _last_raw_render_rgba = None
+    _last_rendered_frame = None
 
 
 _viewport_auto_enabled = False
@@ -309,7 +349,7 @@ def _do_viewport_update():
             return None
 
     try:
-        _run_dlss5_on_scene(scene, node)
+        _run_dlss5_on_scene(scene, node, is_viewport_update=True)
     except Exception as e:
         print(f"[DLSS5 Viewport] 视口更新异常: {e}")
 
@@ -371,11 +411,23 @@ def on_load_post(dummy):
 def register_handlers():
     global _viewport_auto_enabled
 
+    if on_render_init not in bpy.app.handlers.render_init:
+        bpy.app.handlers.render_init.append(on_render_init)
+
     if on_render_pre not in bpy.app.handlers.render_pre:
         bpy.app.handlers.render_pre.append(on_render_pre)
 
     if on_render_post not in bpy.app.handlers.render_post:
         bpy.app.handlers.render_post.append(on_render_post)
+
+    if on_frame_change_pre not in bpy.app.handlers.frame_change_pre:
+        bpy.app.handlers.frame_change_pre.append(on_frame_change_pre)
+
+    if on_render_complete not in bpy.app.handlers.render_complete:
+        bpy.app.handlers.render_complete.append(on_render_complete)
+
+    if on_render_cancel not in bpy.app.handlers.render_cancel:
+        bpy.app.handlers.render_cancel.append(on_render_cancel)
 
     if on_depsgraph_update_post not in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.append(on_depsgraph_update_post)
@@ -384,7 +436,7 @@ def register_handlers():
         bpy.app.handlers.load_post.append(on_load_post)
 
     _viewport_auto_enabled = True
-    print("[DLSS5] 事件处理器已注册（含预渲染保护与视口实时更新）")
+    print("[DLSS5] 事件处理器已注册（含预渲染保护与多帧动画同步更新）")
 
 
 def unregister_handlers():
@@ -398,11 +450,23 @@ def unregister_handlers():
         except Exception:
             pass
 
+    if on_render_init in bpy.app.handlers.render_init:
+        bpy.app.handlers.render_init.remove(on_render_init)
+
     if on_render_pre in bpy.app.handlers.render_pre:
         bpy.app.handlers.render_pre.remove(on_render_pre)
 
     if on_render_post in bpy.app.handlers.render_post:
         bpy.app.handlers.render_post.remove(on_render_post)
+
+    if on_frame_change_pre in bpy.app.handlers.frame_change_pre:
+        bpy.app.handlers.frame_change_pre.remove(on_frame_change_pre)
+
+    if on_render_complete in bpy.app.handlers.render_complete:
+        bpy.app.handlers.render_complete.remove(on_render_complete)
+
+    if on_render_cancel in bpy.app.handlers.render_cancel:
+        bpy.app.handlers.render_cancel.remove(on_render_cancel)
 
     if on_depsgraph_update_post in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(on_depsgraph_update_post)
