@@ -266,12 +266,100 @@ def on_render_pre(scene):
 @persistent
 def on_frame_change_pre(scene):
     """
-    动画多帧切帧前回调：
+    动画多帧切帧前回调（渲染序列）：
     重置帧间缓存，保证逐帧计算独立，杜绝上一帧画面回灌
     """
     global _is_processing, _last_raw_render_rgba
     _is_processing = False
     _last_raw_render_rgba = None
+
+
+# ─── 时间线拖动防抖定时器（frame_change_post 专用）───
+_TIMELINE_DEBOUNCE_SECONDS = 0.35  # 拖动停止后 350ms 再触发推理，避免逐帧 GPU 推理卡顿
+_timeline_last_frame = None        # 最近触发 frame_change_post 的帧号
+
+
+def _do_timeline_update():
+    """
+    时间线换帧防抖定时器回调：
+    用户停止拖动后延迟执行，从当前帧的 Render Result 提取图像并推理。
+    """
+    global _is_processing, _timeline_last_frame
+
+    if _is_processing:
+        return None
+
+    # 若当前正在进行正式渲染作业，放弃视口更新，优先保障渲染
+    if hasattr(bpy.app, 'is_job_running') and bpy.app.is_job_running('RENDER'):
+        return None
+
+    scene = getattr(bpy.context, 'scene', None)
+    if scene is None:
+        return None
+
+    node = _get_dlss5_node(scene)
+    if node is None or not node.auto_process_on_render:
+        return None
+
+    # 检查是否有可处理的有效输入
+    input_image = None
+    if "Image" in node.inputs and node.inputs["Image"].is_linked:
+        link = node.inputs["Image"].links[0]
+        if link.from_node.bl_idname == 'CompositorNodeImage' and link.from_node.image:
+            input_image = link.from_node.image
+
+    if input_image is None and not has_render_data(scene):
+        return None
+
+    try:
+        success = _run_dlss5_on_scene(scene, node, is_viewport_update=True)
+        if success:
+            print(f"[DLSS5] 时间线换帧 → 帧 {scene.frame_current} 推理完成")
+    except Exception as e:
+        print(f"[DLSS5 Timeline] 换帧处理异常: {e}")
+
+    return None
+
+
+@persistent
+def on_frame_change_post(scene):
+    """
+    时间线换帧后回调（视口拖动时间线专用）：
+    防抖注册延迟推理定时器，用户停止拖动后才执行 DLSS5 GPU 推理，
+    避免每拖动一帧都立即触发重型推理造成界面卡顿。
+    注意：渲染动画序列时也会触发此回调，但彼时 is_job_running('RENDER') 为 True，
+    会在 _do_timeline_update 中被拦截，因此不会与 on_render_post 冲突。
+    """
+    global _last_raw_render_rgba, _timeline_last_frame
+
+    if not _viewport_auto_enabled:
+        return
+
+    # 若正在正式渲染序列，不干预（由 on_render_post 负责）
+    if hasattr(bpy.app, 'is_job_running') and bpy.app.is_job_running('RENDER'):
+        return
+
+    node = _get_dlss5_node(scene)
+    if node is None or not node.auto_process_on_render:
+        return
+
+    cur_frame = scene.frame_current
+    _timeline_last_frame = cur_frame
+
+    # 换帧时清除旧帧缓存，确保推理用新帧数据
+    _last_raw_render_rgba = None
+
+    # 取消旧定时器，重新注册（防抖：只在最后一帧停顿后触发）
+    if bpy.app.timers.is_registered(_do_timeline_update):
+        try:
+            bpy.app.timers.unregister(_do_timeline_update)
+        except Exception:
+            pass
+
+    try:
+        bpy.app.timers.register(_do_timeline_update, first_interval=_TIMELINE_DEBOUNCE_SECONDS)
+    except Exception as e:
+        print(f"[DLSS5 Timeline] 注册换帧定时器失败: {e}")
 
 
 @persistent
@@ -423,6 +511,9 @@ def register_handlers():
     if on_frame_change_pre not in bpy.app.handlers.frame_change_pre:
         bpy.app.handlers.frame_change_pre.append(on_frame_change_pre)
 
+    if on_frame_change_post not in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.append(on_frame_change_post)
+
     if on_render_complete not in bpy.app.handlers.render_complete:
         bpy.app.handlers.render_complete.append(on_render_complete)
 
@@ -436,7 +527,8 @@ def register_handlers():
         bpy.app.handlers.load_post.append(on_load_post)
 
     _viewport_auto_enabled = True
-    print("[DLSS5] 事件处理器已注册（含预渲染保护与多帧动画同步更新）")
+    print("[DLSS5] 事件处理器已注册（含预渲染保护与多帧动画同步更新、时间线换帧防抖）")
+
 
 
 def unregister_handlers():
@@ -447,6 +539,12 @@ def unregister_handlers():
     if bpy.app.timers.is_registered(_do_viewport_update):
         try:
             bpy.app.timers.unregister(_do_viewport_update)
+        except Exception:
+            pass
+
+    if bpy.app.timers.is_registered(_do_timeline_update):
+        try:
+            bpy.app.timers.unregister(_do_timeline_update)
         except Exception:
             pass
 
@@ -462,6 +560,9 @@ def unregister_handlers():
     if on_frame_change_pre in bpy.app.handlers.frame_change_pre:
         bpy.app.handlers.frame_change_pre.remove(on_frame_change_pre)
 
+    if on_frame_change_post in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.remove(on_frame_change_post)
+
     if on_render_complete in bpy.app.handlers.render_complete:
         bpy.app.handlers.render_complete.remove(on_render_complete)
 
@@ -475,4 +576,5 @@ def unregister_handlers():
         bpy.app.handlers.load_post.remove(on_load_post)
 
     print("[DLSS5] 事件处理器已注销")
+
 
