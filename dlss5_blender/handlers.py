@@ -153,14 +153,17 @@ def _run_dlss5_on_scene(scene, node=None, is_viewport_update=False):
         if is_viewport_update and rgba is None and _last_raw_render_rgba is not None:
             rgba = _last_raw_render_rgba
 
-        # 兜底：从场景 Render Result 提取真实渲染层
+        # 兜底：从场景 Render Result 提取（适用于 F12 渲染后的情况）
+        # 视口拖动时间线时，Render Result 若包含当前帧数据则使用，否则报错退出（不伪造数据）
         if rgba is None:
             try:
                 input_image = get_active_render_result_image()
                 rgba = get_render_rgba(scene, input_image)
             except Exception as e:
-                print(f"[DLSS5] 获取渲染图像失败: {e}")
+                if not is_viewport_update:
+                    print(f"[DLSS5] 获取渲染图像失败: {e}")
                 return False
+
 
         if rgba is None:
             print("[DLSS5] 未能获取有效输入画面")
@@ -282,7 +285,9 @@ _timeline_last_frame = None        # 最近触发 frame_change_post 的帧号
 def _do_timeline_update():
     """
     时间线换帧防抖定时器回调：
-    用户停止拖动后延迟执行，从当前帧的 Render Result 提取图像并推理。
+    用户停止拖动后延迟执行，从当前帧的合成器中间结果提取图像并推理。
+    注意：时间线拖动是视口预览行为，不依赖 auto_process_on_render 渲染自动执行开关；
+    只要节点存在且上游 Image 插槽有连线，即响应时间线拖动。
     """
     global _is_processing, _timeline_last_frame
 
@@ -298,17 +303,13 @@ def _do_timeline_update():
         return None
 
     node = _get_dlss5_node(scene)
-    if node is None or not node.auto_process_on_render:
+    if node is None:
         return None
 
-    # 检查是否有可处理的有效输入
-    input_image = None
-    if "Image" in node.inputs and node.inputs["Image"].is_linked:
-        link = node.inputs["Image"].links[0]
-        if link.from_node.bl_idname == 'CompositorNodeImage' and link.from_node.image:
-            input_image = link.from_node.image
-
-    if input_image is None and not has_render_data(scene):
+    # 时间线拖动：只要上游 Image 插槽有任意连线即可触发（不要求 auto_process_on_render）
+    # 这样拖动时间线就像其他合成器节点一样实时更新，与渲染后自动执行开关解耦
+    has_upstream = "Image" in node.inputs and node.inputs["Image"].is_linked
+    if not has_upstream:
         return None
 
     try:
@@ -327,20 +328,23 @@ def on_frame_change_post(scene):
     时间线换帧后回调（视口拖动时间线专用）：
     防抖注册延迟推理定时器，用户停止拖动后才执行 DLSS5 GPU 推理，
     避免每拖动一帧都立即触发重型推理造成界面卡顿。
-    注意：渲染动画序列时也会触发此回调，但彼时 is_job_running('RENDER') 为 True，
+    注意：此回调与 _viewport_auto_enabled 解耦，独立于参数防抖更新路径；
+    渲染动画序列时也会触发此回调，但彼时 is_job_running('RENDER') 为 True，
     会在 _do_timeline_update 中被拦截，因此不会与 on_render_post 冲突。
     """
     global _last_raw_render_rgba, _timeline_last_frame
-
-    if not _viewport_auto_enabled:
-        return
 
     # 若正在正式渲染序列，不干预（由 on_render_post 负责）
     if hasattr(bpy.app, 'is_job_running') and bpy.app.is_job_running('RENDER'):
         return
 
     node = _get_dlss5_node(scene)
-    if node is None or not node.auto_process_on_render:
+    if node is None:
+        return
+
+    # 只要节点存在且上游有连线，就响应时间线拖动（不依赖 _viewport_auto_enabled）
+    has_upstream = "Image" in node.inputs and node.inputs["Image"].is_linked
+    if not has_upstream:
         return
 
     cur_frame = scene.frame_current
@@ -360,6 +364,7 @@ def on_frame_change_post(scene):
         bpy.app.timers.register(_do_timeline_update, first_interval=_TIMELINE_DEBOUNCE_SECONDS)
     except Exception as e:
         print(f"[DLSS5 Timeline] 注册换帧定时器失败: {e}")
+
 
 
 @persistent
