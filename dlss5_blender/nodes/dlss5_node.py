@@ -382,26 +382,92 @@ class CompositorNodeDLSS5(CustomGroupBase):
         }
 
 
-# ─── 合成器 Shift+A 菜单注册 ───
-class DLSS5NodeCategory(NodeCategory):
-    @classmethod
-    def poll(cls, context):
-        return context.space_data.tree_type == 'CompositorNodeTree'
+# ─── 合成器 Shift+A 菜单注册 (双轨兼容 Blender 3.6 与 Blender 4.x / 5.x) ───
+
+# 1. 传统 Blender 3.x 注册定义 (基于 nodeitems_utils)
+if HAS_NODEITEMS:
+    class DLSS5NodeCategory(NodeCategory):
+        @classmethod
+        def poll(cls, context):
+            return getattr(getattr(context, 'space_data', None), 'tree_type', None) == 'CompositorNodeTree'
+
+    node_categories = [
+        DLSS5NodeCategory(
+            'DLSS5_NODES',
+            "DLSS5 神经渲染",
+            items=[
+                NodeItem("CompositorNodeDLSS5", label="DLSS5 Neural Rendering")
+            ]
+        )
+    ]
+else:
+    node_categories = []
 
 
-node_categories = [
-    DLSS5NodeCategory(
-        'DLSS5_NODES',
-        "DLSS5 神经渲染",
-        items=[
-            NodeItem("CompositorNodeDLSS5", label="DLSS5 Neural Rendering")
-        ]
-    )
-]
+# 2. 现代 Blender 4.x / 5.x 菜单定义与追加 (基于 NODE_MT_compositor_node_add_all 等)
+class NODE_MT_category_dlss5(bpy.types.Menu):
+    bl_idname = 'NODE_MT_category_dlss5'
+    bl_label = 'DLSS5 神经渲染'
+
+    def draw(self, context):
+        layout = self.layout
+        props = layout.operator("node.add_node", text="DLSS5 Neural Rendering", icon='SHADERFX')
+        props.type = "CompositorNodeDLSS5"
+        if hasattr(props, "use_transform"):
+            props.use_transform = True
+
+
+def _menu_draw_compositor_add_all(self, context):
+    layout = self.layout
+    layout.separator()
+    layout.menu('NODE_MT_category_dlss5', text="DLSS5 神经渲染", icon='SHADERFX')
+
+
+def _menu_draw_compositor_filter(self, context):
+    layout = self.layout
+    layout.separator()
+    props = layout.operator("node.add_node", text="DLSS5 Neural Rendering", icon='SHADERFX')
+    props.type = "CompositorNodeDLSS5"
+    if hasattr(props, "use_transform"):
+        props.use_transform = True
+
+
+def _menu_draw_node_add(self, context):
+    snode = getattr(context, 'space_data', None)
+    if snode and getattr(snode, 'tree_type', None) == 'CompositorNodeTree':
+        layout = self.layout
+        layout.separator()
+        layout.menu('NODE_MT_category_dlss5', text="DLSS5 神经渲染", icon='SHADERFX')
 
 
 def register_node_category():
-    if HAS_NODEITEMS:
+    # 注册现代 Blender 4/5 菜单类
+    try:
+        bpy.utils.register_class(NODE_MT_category_dlss5)
+    except Exception:
+        pass
+
+    # Blender 4.x / 5.x: 注入到 Compositor 的 Shift+A 根菜单、滤镜子菜单及全局添加菜单
+    if hasattr(bpy.types, 'NODE_MT_compositor_node_add_all'):
+        try:
+            bpy.types.NODE_MT_compositor_node_add_all.append(_menu_draw_compositor_add_all)
+        except Exception:
+            pass
+
+    if hasattr(bpy.types, 'NODE_MT_category_compositor_filter'):
+        try:
+            bpy.types.NODE_MT_category_compositor_filter.append(_menu_draw_compositor_filter)
+        except Exception:
+            pass
+
+    if hasattr(bpy.types, 'NODE_MT_add'):
+        try:
+            bpy.types.NODE_MT_add.append(_menu_draw_node_add)
+        except Exception:
+            pass
+
+    # Blender 3.x 传统注册
+    if HAS_NODEITEMS and node_categories:
         try:
             nodeitems_utils.register_node_categories('DLSS5_NODES', node_categories)
         except Exception:
@@ -409,8 +475,34 @@ def register_node_category():
 
 
 def unregister_node_category():
-    if HAS_NODEITEMS:
+    # Blender 3.x 传统注销
+    if HAS_NODEITEMS and node_categories:
         try:
             nodeitems_utils.unregister_node_categories('DLSS5_NODES')
         except Exception:
             pass
+
+    # Blender 4.x / 5.x 菜单注销
+    if hasattr(bpy.types, 'NODE_MT_compositor_node_add_all'):
+        try:
+            bpy.types.NODE_MT_compositor_node_add_all.remove(_menu_draw_compositor_add_all)
+        except Exception:
+            pass
+
+    if hasattr(bpy.types, 'NODE_MT_category_compositor_filter'):
+        try:
+            bpy.types.NODE_MT_category_compositor_filter.remove(_menu_draw_compositor_filter)
+        except Exception:
+            pass
+
+    if hasattr(bpy.types, 'NODE_MT_add'):
+        try:
+            bpy.types.NODE_MT_add.remove(_menu_draw_node_add)
+        except Exception:
+            pass
+
+    try:
+        bpy.utils.unregister_class(NODE_MT_category_dlss5)
+    except Exception:
+        pass
+
