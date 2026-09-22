@@ -78,20 +78,29 @@
 
 #### 5.1 环境要求
 - Windows 10 / 11 64-bit
-- Visual Studio 2022 (MSVC v143, 支持 C++20)
+- Visual Studio 2022 (MSVC v143, 支持 C++20) 或 CMake 3.20+
 - Windows SDK (包含 Direct3D 12 与 DXGI 头文件与静态库)
 
-#### 5.2 一键编译命令
+#### 5.2 编译方式
+
+**方式一：使用一键批处理构建（推荐）**
 直接在终端或 Visual Studio 开发者命令行中运行：
 ```cmd
 cd src_worker
 build.bat
 ```
-编译脚本将自动调用 MSVC 编译器：
+编译脚本将自动检测 Visual Studio 环境并调用 MSVC 编译器：
 ```cmd
-cl /EHsc /O2 /std:c++20 main.cpp d3d12_dlssnr.cpp /link /out:"..\bin\dlss5_worker.exe" d3d12.lib dxgi.lib
+cl /nologo /EHsc /O2 /std:c++20 main.cpp d3d12_dlssnr.cpp /link /nologo /out:"..\bin\dlss5_worker.exe" d3d12.lib dxgi.lib
 ```
 并自动将生成的 `dlss5_worker.exe` 部署至 `dlss5_blender/bin/` 供插件调用。
+
+**方式二：使用 CMake 构建**
+```cmd
+cmake -B build -S src_worker
+cmake --build build --config Release
+copy /Y build\Release\dlss5_worker.exe dlss5_blender\bin\dlss5_worker.exe
+```
 
 ---
 
@@ -103,7 +112,7 @@ cl /EHsc /O2 /std:c++20 main.cpp d3d12_dlssnr.cpp /link /out:"..\bin\dlss5_worke
 
 ### 2. Key Features
 - **⚡ Native Direct3D 12 Tensor Core Execution**: Pure C++20 asynchronous worker architecture directly orchestrates GPU physical Tensor Cores with near-zero runtime overhead.
-- **🎨 Native Compositor Integration**: Single `CompositorNodeDLSS5` node connecting Color, Depth, Vector (Motion), and Normal passes, smoothly feeding into downstream color grading, glares, and output nodes.
+- **🎨 Seamless Single Compositor Node Integration**: Single `CompositorNodeDLSS5` node connecting Color, Depth, Vector (Motion), and Normal passes, smoothly feeding into downstream color grading, glares, and output nodes.
 - **🎯 Architecture-Specific Model Optimization**: Dedicated builds for Turing (RTX 20), Ampere (RTX 30), Ada Lovelace (RTX 40), and Blackwell (RTX 50) architectures to fully saturate each generation's compute units.
 - **🛡️ Cross-Architecture Safety Interlock**: Intelligently verifies host GPU architecture against loaded weights, preventing driver-level crashes when incompatible packages are used.
 - **🚫 Zero Fake Emulation**: 100% genuine D3D12 hardware pipeline—no CPU software filters or counterfeit image effects.
@@ -125,13 +134,24 @@ Download the release archive corresponding to your NVIDIA GPU from [GitHub Relea
 
 ### 4. Installation & Quick Start
 
-1. Download the appropriate `.zip` package for your GPU from the [Releases](https://github.com/dutou520/DLSS5-composite-node-for-blender/releases) page.
-2. Open Blender (3.6 LTS or newer).
+#### 4.1 One-Click Installation
+1. Download the appropriate `.zip` package for your GPU from the [Releases](https://github.com/dutou520/DLSS5-composite-node-for-blender/releases) page (e.g. `dlss5_blender_rtx30.zip` for RTX 3060/3070/3080).
+2. Open Blender (3.6 LTS or newer recommended).
 3. Navigate to **Edit > Preferences > Add-ons**.
 4. Click **Install from Disk...** and select the downloaded zip file.
 5. Check the box to enable **Node: DLSS5 神经渲染 (Neural Rendering)**.
-6. Open the 3D Viewport, press `N` to open the sidebar, select the **DLSS5** tab, and click **Auto Setup Compositor**.
-7. Press `F12` to render. DLSS 5 will reconstruct the output automatically upon render completion.
+
+#### 4.2 Verify Component Readiness
+1. Expand the add-on preferences under **DLSS5 Neural Rendering Configuration**:
+   - Confirm `dlss5_worker.exe`, `nvngx_dlssnr.dll`, and `nvngx.dll_dlssnr.dll` report `✓ Ready`.
+   - Confirm the Native D3D12 engine detects your RTX GPU model.
+2. In the 3D Viewport, press `N` to open the sidebar, select the **DLSS5** tab, and confirm the hardware engine is active.
+
+#### 4.3 Compositor Pipeline & Rendering
+1. In the 3D Viewport DLSS5 sidebar panel, click **Auto Setup Compositor**. The add-on creates:
+   `Render Layers` ➔ `DLSS 5 Neural Rendering` ➔ `Composite` & `Viewer`.
+2. Connect downstream nodes (Color Balance, Glare, Curves) directly after the DLSS5 node output.
+3. Press `F12` to render. DLSS 5 will reconstruct the image via Tensor Cores automatically upon completion.
 
 ---
 
@@ -139,11 +159,19 @@ Download the release archive corresponding to your NVIDIA GPU from [GitHub Relea
 
 The high-performance Direct3D 12 worker binary can be compiled independently from source in `src_worker/`:
 
+#### Option A: Build with Batch Script (Recommended)
 ```cmd
 cd src_worker
 build.bat
 ```
-This builds `dlss5_worker.exe` using MSVC C++20 and deploys it to `dlss5_blender/bin/`.
+This detects the MSVC environment, compiles `dlss5_worker.exe` using C++20, and deploys it to `dlss5_blender/bin/`.
+
+#### Option B: Build with CMake
+```cmd
+cmake -B build -S src_worker
+cmake --build build --config Release
+copy /Y build\Release\dlss5_worker.exe dlss5_blender\bin\dlss5_worker.exe
+```
 
 ---
 
