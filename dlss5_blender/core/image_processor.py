@@ -241,12 +241,9 @@ def get_render_rgba(scene: bpy.types.Scene,
                 except Exception:
                     pass
 
-    # 3. 最终回退：根据当前场景分辨率构造纯色测试缓冲区
-    w = int(scene.render.resolution_x * scene.render.resolution_percentage / 100)
-    h = int(scene.render.resolution_y * scene.render.resolution_percentage / 100)
-    fallback = np.zeros((h, w, 4), dtype=np.float32)
-    fallback[:, :, 3] = 1.0
-    return fallback
+    # 3. 若无可用的渲染数据，严格返回 None，绝不伪造黑帧或调用神经网络
+    return None
+
 
 
 def write_dlss5_output(out_rgba: np.ndarray,

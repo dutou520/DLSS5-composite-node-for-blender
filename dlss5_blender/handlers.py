@@ -29,7 +29,8 @@ _DEBOUNCE_SECONDS = 1.5
 _last_node_params_hash = None
 _last_raw_render_rgba = None  # 视口防抖更新时缓存原始渲染帧，避免参数调节时递归读取合成结果
 _last_rendered_frame = None  # 记录最近一次处理的帧号，切帧时强制失效旧缓存
-_hijacked_targets = set()  # 保存被 on_render_pre 劫持的 (节点名, 插槽名)
+_orig_use_compositing = None  # 记录渲染前 scene.render.use_compositing 原始设置
+_suspended_compositing = False  # 标记是否在 3D 渲染阶段临时挂起了合成器
 
 
 def _get_dlss5_node(scene):
@@ -39,6 +40,28 @@ def _get_dlss5_node(scene):
     for node in tree.nodes:
         if node.bl_idname == 'CompositorNodeDLSS5':
             return node
+    return None
+
+
+def _trace_upstream_source(node, socket_name="Image"):
+    """沿着链路向上追溯真正的源头节点（穿透 Reroute 等中继节点）"""
+    if not node or socket_name not in node.inputs or not node.inputs[socket_name].is_linked:
+        return None
+    curr_sock = node.inputs[socket_name]
+    visited = set()
+    while curr_sock and curr_sock.is_linked:
+        link = curr_sock.links[0]
+        from_node = link.from_node
+        if from_node in visited:
+            break
+        visited.add(from_node)
+        if from_node.bl_idname == 'NodeReroute':
+            if from_node.inputs and from_node.inputs[0].is_linked:
+                curr_sock = from_node.inputs[0]
+            else:
+                return from_node
+        else:
+            return from_node
     return None
 
 
@@ -89,7 +112,6 @@ def _run_dlss5_on_scene(scene, node=None, is_viewport_update=False):
 
     try:
         rgba = None
-        temp_dir = tempfile.gettempdir()
         cur_frame = scene.frame_current if scene else 1
 
         # 若切帧，强制失效历史渲染帧缓存，保证每一帧严格独立计算
@@ -97,57 +119,16 @@ def _run_dlss5_on_scene(scene, node=None, is_viewport_update=False):
             _last_raw_render_rgba = None
         _last_rendered_frame = cur_frame
 
-        # 优先检索当前帧专属转储 OpenEXR 文件
-        dump_candidates = [
-            os.path.join(temp_dir, f"dlss5_raw_{cur_frame:04d}.exr"),
-            os.path.join(temp_dir, f"dlss5_raw_{cur_frame}.exr"),
-            os.path.join(temp_dir, f"dlss5_raw_Image{cur_frame:04d}.exr"),
-            os.path.join(temp_dir, f"dlss5_raw_Image_{cur_frame:04d}.exr"),
-            os.path.join(temp_dir, f"dlss5_raw_Image{cur_frame}.exr"),
-            os.path.join(temp_dir, f"dlss5_raw_Image_{cur_frame}.exr"),
-        ]
 
-        import glob
-        for pat in (f"dlss5_raw_*{cur_frame:04d}*.exr", f"dlss5_raw_*{cur_frame}*.exr"):
-            for fpath in glob.glob(os.path.join(temp_dir, pat)):
-                if fpath not in dump_candidates:
-                    dump_candidates.append(fpath)
-
-        if is_viewport_update:
-            dump_candidates.extend([
-                os.path.join(temp_dir, "dlss5_raw_Image.exr"),
-                os.path.join(temp_dir, "dlss5_raw_.exr"),
-            ])
-
-        for candidate in dump_candidates:
-            if os.path.exists(candidate) and os.path.getsize(candidate) > 0:
-                try:
-                    loaded = bpy.data.images.load(candidate, check_existing=False)
-                    if loaded.size[0] > 0 and loaded.size[1] > 0:
-                        from .core.image_processor import get_image_pixels_as_numpy, _set_image_linear_colorspace
-                        _set_image_linear_colorspace(loaded)
-                        rgba = get_image_pixels_as_numpy(loaded)
-                        bpy.data.images.remove(loaded)
-                        try:
-                            os.remove(candidate)
-                        except Exception:
-                            pass
-                        break
-                    else:
-                        bpy.data.images.remove(loaded)
-                except Exception as e:
-                    print(f"[DLSS5] 读取内部缓存 EXR 失败: {e}")
-
-        # 如果上游直接连接了静态/外部 CompositorNodeImage 图像节点
+        # 如果上游直接或间接（穿透 Reroute）连接了静态/外部 CompositorNodeImage 图像节点
         if rgba is None:
-            if "Image" in node.inputs and node.inputs["Image"].is_linked:
-                link = node.inputs["Image"].links[0]
-                if link.from_node.bl_idname == 'CompositorNodeImage' and link.from_node.image:
-                    try:
-                        from .core.image_processor import get_image_pixels_as_numpy
-                        rgba = get_image_pixels_as_numpy(link.from_node.image)
-                    except Exception:
-                        pass
+            upstream_src = _trace_upstream_source(node, "Image")
+            if upstream_src and upstream_src.bl_idname == 'CompositorNodeImage' and upstream_src.image:
+                try:
+                    from .core.image_processor import get_image_pixels_as_numpy
+                    rgba = get_image_pixels_as_numpy(upstream_src.image)
+                except Exception:
+                    pass
 
         # 仅在纯视口参数防抖微调时复用上一帧缓存；渲染或动画过程中严禁复用以防帧间画面静止
         if is_viewport_update and rgba is None and _last_raw_render_rgba is not None:
@@ -234,9 +215,13 @@ def _run_dlss5_on_scene(scene, node=None, is_viewport_update=False):
 def on_render_init(scene):
     """
     渲染作业启动初始化回调：
-    重置所有多帧渲染状态，清除上一帧残留缓存，取消视口更新定时器
+    1. 重置所有多帧渲染状态，清除上一帧残留缓存，取消视口更新定时器
+    2. 如果当前合成器中存在 DLSS5 节点且上游是 3D 渲染层（非 CompositorNodeImage），
+       在渲染作业启动时挂起合成器 (use_compositing = False)，
+       锁定纯净 3D 渲染层，彻底解决合成器在 DLSS5 推理前求值导致死循环覆盖 Render Result 的问题！
     """
     global _is_processing, _last_raw_render_rgba, _last_rendered_frame
+    global _orig_use_compositing, _suspended_compositing
     _is_processing = False
     _last_raw_render_rgba = None
     _last_rendered_frame = None
@@ -247,13 +232,25 @@ def on_render_init(scene):
         except Exception:
             pass
 
+    target_scene = scene if scene else getattr(bpy.context, 'scene', None)
+    if target_scene:
+        node = _get_dlss5_node(target_scene)
+        if node and node.auto_process_on_render:
+            upstream_src = _trace_upstream_source(node, "Image")
+            # 只有当上游不是外部图像节点（即连接了 3D 渲染层或无连接默认场景）时，才挂起合成器
+            if not (upstream_src and upstream_src.bl_idname == 'CompositorNodeImage'):
+                if target_scene.render.use_compositing:
+                    _orig_use_compositing = True
+                    _suspended_compositing = True
+                    target_scene.render.use_compositing = False
+                    print("[DLSS5] 渲染作业初始化：挂起合成器求值，锁定纯净 3D 渲染层")
+
 
 @persistent
 def on_render_pre(scene):
     """
     每帧渲染开始前回调：
-    1. 取消防抖定时器，重置每帧标志位与旧帧缓存
-    2. 严格杜绝修改创作者节点树连线
+    取消防抖定时器，重置每帧标志位与旧帧缓存
     """
     global _is_processing, _last_raw_render_rgba
     _is_processing = False
@@ -371,9 +368,10 @@ def on_frame_change_post(scene):
 def on_render_post(scene):
     """
     单帧或动画序列单帧渲染完成后回调：
-    立即同步执行 DLSS5 神经后处理并写回合成器图像数据块。
-    无论后台无头模式还是交互式 GUI 模式 (Ctrl+F12 / F12)，
-    均在当前帧结束时同步完成，彻底杜绝定时器在动画过程中被抑制导致后续帧不更新的问题。
+    1. 立即同步执行 DLSS5 神经后处理并写回合成器图像数据块。
+    2. 若处于文件渲染输出模式且生成了目标文件，将最终 DLSS5 结果覆写回磁盘。
+    注意：若挂起了合成器，此处保持挂起状态以保证后续动画帧不受污染，
+    在整个作业完成时 (on_render_complete) 统一恢复并触发合成器刷新。
     """
     target_scene = scene if scene else getattr(bpy.context, 'scene', None)
     node = _get_dlss5_node(target_scene) if target_scene else None
@@ -388,24 +386,58 @@ def on_render_post(scene):
         if node:
             node.last_status = f"错误: {str(e)[:40]}"
         print(f"[DLSS5 Error] 渲染后处理异常: {e}")
+    finally:
+        # 若处于文件渲染输出模式且生成了目标文件，将当前帧神经重构结果覆写回磁盘文件
+        if _suspended_compositing and target_scene:
+            try:
+                cur_frame = target_scene.frame_current
+                frame_file = bpy.path.abspath(target_scene.render.frame_path(frame=cur_frame))
+                if os.path.exists(frame_file):
+                    out_img = bpy.data.images.get("DLSS5_Output")
+                    if out_img:
+                        out_img.save_render(frame_file, scene=target_scene)
+            except Exception as e:
+                print(f"[DLSS5] 覆写最终渲染文件提示: {e}")
 
 
 @persistent
 def on_render_complete(scene):
-    """渲染作业全部完成回调：重置状态"""
+    """渲染作业全部完成回调：重置状态并安全恢复合成器"""
     global _is_processing, _last_raw_render_rgba, _last_rendered_frame
+    global _orig_use_compositing, _suspended_compositing
     _is_processing = False
     _last_raw_render_rgba = None
     _last_rendered_frame = None
+
+    target_scene = scene if scene else getattr(bpy.context, 'scene', None)
+    if _suspended_compositing and target_scene and _orig_use_compositing is not None:
+        try:
+            target_scene.render.use_compositing = _orig_use_compositing
+            force_compositor_update(target_scene)
+            print("[DLSS5] 渲染作业完成：恢复合成器求值并刷新视图")
+        except Exception:
+            pass
+        _suspended_compositing = False
 
 
 @persistent
 def on_render_cancel(scene):
-    """渲染作业取消回调：重置状态"""
+    """渲染作业取消回调：重置状态并安全恢复合成器"""
     global _is_processing, _last_raw_render_rgba, _last_rendered_frame
+    global _orig_use_compositing, _suspended_compositing
     _is_processing = False
     _last_raw_render_rgba = None
     _last_rendered_frame = None
+
+    target_scene = scene if scene else getattr(bpy.context, 'scene', None)
+    if _suspended_compositing and target_scene and _orig_use_compositing is not None:
+        try:
+            target_scene.render.use_compositing = _orig_use_compositing
+            force_compositor_update(target_scene)
+            print("[DLSS5] 渲染作业取消：安全恢复合成器设置")
+        except Exception:
+            pass
+        _suspended_compositing = False
 
 
 _viewport_auto_enabled = False
