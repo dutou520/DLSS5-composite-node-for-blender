@@ -356,40 +356,52 @@ else:
     node_categories = []
 
 
-# 2. 现代 Blender 4.x / 5.x 菜单定义与追加 (基于 NODE_MT_compositor_node_add_all 等)
+# 2. 现代 Blender 4.x / 5.x 菜单定义与追加 (基于 node_add_menu 与 NODE_MT_compositor_node_add_all)
+def _add_dlss5_node_operator(layout, text="DLSS5 神经渲染 (Neural Rendering)"):
+    """使用 Blender 官方标准的 node_add_menu.add_node_type 挂载节点，确保搜索与即时放置完全原生兼容"""
+    try:
+        from bl_ui import node_add_menu
+        node_add_menu.add_node_type(
+            layout,
+            "CompositorNodeDLSS5",
+            label=text,
+            search_weight=2.0
+        )
+    except Exception:
+        props = layout.operator("node.add_node", text=text, icon='SHADERFX')
+        props.type = "CompositorNodeDLSS5"
+        if hasattr(props, "use_transform"):
+            props.use_transform = True
+
+
 class NODE_MT_category_dlss5(bpy.types.Menu):
     bl_idname = 'NODE_MT_category_dlss5'
     bl_label = 'DLSS5 神经渲染'
 
     def draw(self, context):
         layout = self.layout
-        props = layout.operator("node.add_node", text="DLSS5 Neural Rendering", icon='SHADERFX')
-        props.type = "CompositorNodeDLSS5"
-        if hasattr(props, "use_transform"):
-            props.use_transform = True
+        _add_dlss5_node_operator(layout, text="DLSS5 神经渲染 (Neural Rendering)")
 
 
 def _menu_draw_compositor_add_all(self, context):
     layout = self.layout
     layout.separator()
-    layout.menu('NODE_MT_category_dlss5', text="DLSS5 神经渲染", icon='SHADERFX')
+    _add_dlss5_node_operator(layout, text="DLSS5 神经渲染 (Neural Rendering)")
 
 
 def _menu_draw_compositor_filter(self, context):
     layout = self.layout
     layout.separator()
-    props = layout.operator("node.add_node", text="DLSS5 Neural Rendering", icon='SHADERFX')
-    props.type = "CompositorNodeDLSS5"
-    if hasattr(props, "use_transform"):
-        props.use_transform = True
+    _add_dlss5_node_operator(layout, text="DLSS5 神经渲染 (Neural Rendering)")
 
 
 def _menu_draw_node_add(self, context):
+    """仅当系统未提供 NODE_MT_compositor_node_add_all 容器时作为后备注册到 NODE_MT_add"""
     snode = getattr(context, 'space_data', None)
     if snode and getattr(snode, 'tree_type', None) == 'CompositorNodeTree':
         layout = self.layout
         layout.separator()
-        layout.menu('NODE_MT_category_dlss5', text="DLSS5 神经渲染", icon='SHADERFX')
+        _add_dlss5_node_operator(layout, text="DLSS5 神经渲染 (Neural Rendering)")
 
 
 def register_node_category():
@@ -399,8 +411,9 @@ def register_node_category():
     except Exception:
         pass
 
-    # Blender 4.x / 5.x: 注入到 Compositor 的 Shift+A 根菜单、滤镜子菜单及全局添加菜单
-    if hasattr(bpy.types, 'NODE_MT_compositor_node_add_all'):
+    # Blender 4.x / 5.x: 注入到 Compositor 的 Shift+A 根菜单与滤镜分类子菜单
+    has_compositor_all = hasattr(bpy.types, 'NODE_MT_compositor_node_add_all')
+    if has_compositor_all:
         try:
             bpy.types.NODE_MT_compositor_node_add_all.append(_menu_draw_compositor_add_all)
         except Exception:
@@ -412,7 +425,8 @@ def register_node_category():
         except Exception:
             pass
 
-    if hasattr(bpy.types, 'NODE_MT_add'):
+    # 仅当不存在 NODE_MT_compositor_node_add_all 时才注入 NODE_MT_add，避免在 4.x/5.x 中出现重复菜单项
+    if not has_compositor_all and hasattr(bpy.types, 'NODE_MT_add'):
         try:
             bpy.types.NODE_MT_add.append(_menu_draw_node_add)
         except Exception:
